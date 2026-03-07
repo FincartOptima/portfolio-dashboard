@@ -6892,5 +6892,191 @@ body.view-mobile #fundPerformancePage .comparison-table thead th:first-child{
 })();
 </script>
 
+
+<style id="laptop-overlap-and-header-refresh-v8">
+:root{
+  --table-header-bg: linear-gradient(135deg, #0f2460 0%, #1e40af 58%, #2563eb 100%);
+}
+
+/* Dark blue headers everywhere, including mobile overrides */
+#annualContent .comparison-table thead th,
+#fundPerformancePage .comparison-table thead th,
+#overlapTable thead th,
+.marketcap-breakdown-table thead th,
+.comparison-table thead th{
+  background: var(--table-header-bg) !important;
+  color: #ffffff !important;
+  box-shadow: none !important;
+  border-bottom: 1px solid rgba(255,255,255,0.18) !important;
+}
+
+#annualContent .comparison-table thead th:first-child,
+#fundPerformancePage .comparison-table thead th:first-child,
+#overlapTable thead th:first-child,
+.marketcap-breakdown-table thead th:first-child,
+.comparison-table thead th:first-child{
+  background: var(--table-header-bg) !important;
+  color: #ffffff !important;
+}
+
+/* Laptop/Desktop: make stock overlap fully horizontal, aligned, and scroll-friendly */
+#overlapContent .table-wrapper{
+  overflow: auto !important;
+  max-height: min(70vh, 560px) !important;
+  border: 1px solid rgba(37,99,235,0.18) !important;
+  border-radius: 16px !important;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.85) !important;
+}
+
+#overlapTable{
+  table-layout: auto !important;
+  width: max-content !important;
+  min-width: 100% !important;
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+  font-size: 13px !important;
+}
+
+#overlapTable thead th,
+#overlapTable tbody td{
+  writing-mode: horizontal-tb !important;
+  text-orientation: mixed !important;
+  transform: none !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  hyphens: none !important;
+  letter-spacing: 0 !important;
+  vertical-align: middle !important;
+}
+
+#overlapTable thead th{
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 6 !important;
+  padding: 12px 14px !important;
+  text-align: center !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 1.25 !important;
+  white-space: normal !important;
+  min-width: 140px !important;
+  max-width: 160px !important;
+}
+
+#overlapTable tbody td{
+  padding: 11px 14px !important;
+  text-align: center !important;
+  white-space: nowrap !important;
+  min-width: 96px !important;
+  color: #0f2460 !important;
+  background: #ffffff !important;
+}
+
+#overlapTable thead th:first-child{
+  left: 0 !important;
+  z-index: 8 !important;
+  min-width: 220px !important;
+  max-width: 220px !important;
+  text-align: left !important;
+}
+
+#overlapTable tbody td:first-child{
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 5 !important;
+  min-width: 220px !important;
+  max-width: 220px !important;
+  white-space: normal !important;
+  line-height: 1.28 !important;
+  text-align: left !important;
+  font-weight: 700 !important;
+  color: #0f2460 !important;
+  background: #eef5ff !important;
+  box-shadow: 4px 0 10px rgba(15,36,96,0.08) !important;
+}
+
+#overlapTable tbody tr:nth-child(even) td{
+  background: #f7fbff !important;
+}
+#overlapTable tbody tr:nth-child(even) td:first-child{
+  background: #e3efff !important;
+}
+#overlapTable tbody tr:hover td{
+  background: #dbeafe !important;
+}
+#overlapTable tbody tr:hover td:first-child{
+  background: #bfdbfe !important;
+}
+
+/* Keep all overlap labels horizontal in mobile too */
+@media (max-width: 768px){
+  body.view-mobile #overlapContent .table-wrapper{
+    max-height: 62vh !important;
+    border-radius: 14px !important;
+  }
+
+  body.view-mobile #overlapTable{
+    font-size: 10px !important;
+  }
+
+  body.view-mobile #overlapTable thead th{
+    min-width: 120px !important;
+    max-width: 128px !important;
+    padding: 8px 9px !important;
+    font-size: 10px !important;
+    line-height: 1.15 !important;
+  }
+
+  body.view-mobile #overlapTable tbody td{
+    min-width: 72px !important;
+    padding: 7px 8px !important;
+    font-size: 10px !important;
+  }
+
+  body.view-mobile #overlapTable thead th:first-child,
+  body.view-mobile #overlapTable tbody td:first-child{
+    min-width: 132px !important;
+    max-width: 132px !important;
+  }
+
+  body.view-mobile #annualContent .comparison-table thead th,
+  body.view-mobile #fundPerformancePage .comparison-table thead th,
+  body.view-mobile .marketcap-breakdown-table thead th,
+  body.view-mobile #overlapTable thead th{
+    background: var(--table-header-bg) !important;
+    color: #ffffff !important;
+    box-shadow: none !important;
+  }
+
+  body.view-mobile #annualContent .comparison-table thead th:first-child,
+  body.view-mobile #fundPerformancePage .comparison-table thead th:first-child,
+  body.view-mobile .marketcap-breakdown-table thead th:first-child,
+  body.view-mobile #overlapTable thead th:first-child{
+    background: var(--table-header-bg) !important;
+    color: #ffffff !important;
+  }
+}
+
+/* Small desktop polish for overlap matrix */
+@media (min-width: 769px){
+  body.view-laptop #overlapContent .table-wrapper,
+  body:not(.view-mobile) #overlapContent .table-wrapper{
+    padding-bottom: 2px !important;
+  }
+
+  body.view-laptop #overlapTable thead th,
+  body:not(.view-mobile) #overlapTable thead th{
+    min-width: 148px !important;
+    max-width: 168px !important;
+  }
+
+  body.view-laptop #overlapTable tbody td,
+  body:not(.view-mobile) #overlapTable tbody td{
+    min-width: 100px !important;
+  }
+}
+</style>
+
 </body>
 </html>
