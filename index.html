@@ -2995,12 +2995,12 @@ function extractPortfolioSummaryXirr(wb) {
                 } else {
                     const redeemUnits = cf.amount / px;
                     if (redeemUnits - units > 1e-9) {
-                        return {
-                            value: NaN,
-                            note: `${label} hypothetical units would turn negative on ${formatDateShort(cf.date)}; redemption exceeds the bridged ${label} value path.`
-                        };
+                        const availableValue = Math.max(0, units * px);
+                        units = 0;
+                        note += ` | ${label} hypothetical path exhausted on ${formatDateShort(cf.date)}; redemption exceeded the simulated ${label} value path, so the hypothetical ${label} balance was reset to zero until the next external investment`;
+                    } else {
+                        units = Math.max(0, units - redeemUnits);
                     }
-                    units = Math.max(0, units - redeemUnits);
                 }
                 xirrCashflows.push({
                     date: new Date(cf.date.getFullYear(), cf.date.getMonth(), cf.date.getDate()),
@@ -5863,7 +5863,7 @@ function exportDatasetJsonFlow(){
   };
 
   const state = {
-    schemaVersion: 7,  // v7: guards sparse metrics, stricter date parsing, and negative-unit XIRR protection
+    schemaVersion: 8,  // v7: guards sparse metrics, stricter date parsing, and negative-unit XIRR protection
     savedAt: Date.now(),
     clientName: clientName || '',
     clientXirr: document.getElementById('clientXirrDisplay')?.textContent || '',
