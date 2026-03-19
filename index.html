@@ -2955,23 +2955,30 @@ function extractPortfolioSummaryXirr(wb) {
             const lateWithinTolerance = fullCashflows.filter(cf => cf.date > lastSeriesDate && ((cf.date - lastSeriesDate) / DAY_MS) <= maxLagDays);
             let note = `* internal cashflow-matched analytic using series through ${formatDateShort(lastPoint.date)}`;
             const xirrCashflows = [];
+            let bridgeApplied = false;
 
             if (preSeriesCashflows.length) {
                 const syntheticStartValue = futureValueAtDate(preSeriesCashflows, firstSeriesDate, clientXirrPct);
-                if (!(syntheticStartValue > 0)) {
-                    return {
-                        value: NaN,
-                        note: `Cannot bridge pre-${label} history using client XIRR through ${formatDateShort(firstSeriesDate)}.`
-                    };
+                if (syntheticStartValue > 0) {
+                    bridgeApplied = true;
+                    units += syntheticStartValue / Number(firstSeriesValue);
+                    xirrCashflows.push({
+                        date: new Date(firstSeriesDate.getFullYear(), firstSeriesDate.getMonth(), firstSeriesDate.getDate()),
+                        amount: -syntheticStartValue
+                    });
+                    note = `* assumes client earned the reported portfolio XIRR until ${formatDateShort(firstSeriesDate)}, then switched into ${label}; internal analytic only`;
+                } else {
+                    note = `* could not bridge pre-${label} history using client XIRR through ${formatDateShort(firstSeriesDate)}; assumes the client invested in ${label} from the first external cashflow on or after ${formatDateShort(firstSeriesDate)}; internal analytic only`;
                 }
-                units += syntheticStartValue / Number(firstSeriesValue);
-                xirrCashflows.push({
-                    date: new Date(firstSeriesDate.getFullYear(), firstSeriesDate.getMonth(), firstSeriesDate.getDate()),
-                    amount: -syntheticStartValue
-                });
-                note = `* assumes client earned the reported portfolio XIRR until ${formatDateShort(firstSeriesDate)}, then switched into ${label}; internal analytic only`;
             } else {
                 note = `* assumes the client invested in ${label} from their first external cashflow; internal analytic only`;
+            }
+
+            if (!bridgeApplied && !investableCashflows.some(cf => cf.amount < 0)) {
+                return {
+                    value: NaN,
+                    note: `No investable external cashflows on or after ${formatDateShort(firstSeriesDate)} to compute ${label} XIRR.`
+                };
             }
 
             for (const cf of investableCashflows) {
