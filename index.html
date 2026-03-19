@@ -1503,6 +1503,7 @@ th.sortable .sort-ind{ margin-left:6px; font-size:11px; opacity:.7; }
 <div class="metric-label">Fincart Optima (XIRR)</div>
 <div class="metric-value" id="modelXirrDisplay">—</div>
 <div class="metric-footnote" id="modelXirrFootnote"><em>* calculated from 2015</em></div>
+<div class="metric-footnote" id="bseXirrFootnote"><em>* benchmark trailing return is the official SEBI comparison; this XIRR is an internal analytic only</em></div>
 </div>
 <div class="metric-card">
 <div class="metric-label">BSE 500 (XIRR)</div>
@@ -1525,7 +1526,7 @@ th.sortable .sort-ind{ margin-left:6px; font-size:11px; opacity:.7; }
 
   <div class="card">
     <h2 class="card-title">Fund Performance: Absolute Alpha vs Benchmark</h2>
-    <p class="card-subtitle">This table uses the “Top 5 Funds (AUM wise)” file you uploaded on the first page (Sheet 1: Scheme/Date/NAV, Sheet 2: Benchmark Date/NAV). It shows calendar-year absolute alpha = Scheme − Benchmark for 2015–2025.</p>
+    <p class="card-subtitle">This table uses the “Top 5 Funds (AUM wise)” file you uploaded on the first page (Sheet 1: Scheme/Date/NAV, Sheet 2: Benchmark Date/NAV). It shows calendar-year excess return = Scheme − Benchmark for 2015–2025.</p>
     <div class="fp-controls">
       <label class="fp-checkbox">
         <input type="checkbox" id="fpShowAllSchemes" />
@@ -1560,7 +1561,7 @@ th.sortable .sort-ind{ margin-left:6px; font-size:11px; opacity:.7; }
 </div>
 <div class="holdings-layout">
 <div class="holdings-table-wrapper">
-<div class="table-wrapper">
+<div class="table-wrapper" id="portfolioDiagnosisInteractiveTable">
 <table class="comparison-table">
 <thead>
 <tr>
@@ -2444,12 +2445,17 @@ function handleFileUpload(event, key, statusId) {
                 return new Date(epoch.getTime() + val * 24 * 60 * 60 * 1000);
             }
             const s = String(val).trim();
-            // Try ISO first
+
+            // Explicit day-first parsing for Indian broker exports.
+            const dmy = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+            if (dmy) return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
+
+            // Explicit ISO parsing to avoid browser-dependent Date parsing.
+            const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s].*)?$/);
+            if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+
             const d1 = new Date(s);
             if (!isNaN(d1)) return d1;
-            // Try dd/mm/yyyy
-            const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-            if (m) return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
             return null;
         }
 
@@ -2640,8 +2646,8 @@ function extractPortfolioSummaryXirr(wb) {
                     continue;
                 }
 
-                // If value is in decimal (0.12) convert to percent (12)
-                if (last > 0 && last <= 1.5) last = last * 100;
+                // If value is in decimal (0.12 or -0.12) convert to percent (12 or -12)
+                if (Math.abs(last) <= 1.5) last = last * 100;
 
                 return last;
             }
@@ -2917,11 +2923,13 @@ function extractPortfolioSummaryXirr(wb) {
                 return { value: NaN, note: `Not enough cashflows to compute ${label} XIRR.` };
             }
 
-            const tooLate = fullCashflows.find(cf => cf.date > lastSeriesDate);
+            const DAY_MS = 24 * 60 * 60 * 1000;
+            const maxLagDays = 7;
+            const tooLate = fullCashflows.find(cf => ((cf.date - lastSeriesDate) / DAY_MS) > maxLagDays);
             if (tooLate) {
                 return {
                     value: NaN,
-                    note: `${label} series ends on ${formatDateShort(lastSeriesDate)}; later cashflows cannot be priced reliably.`
+                    note: `${label} series ends on ${formatDateShort(lastSeriesDate)}; cashflows more than ${maxLagDays} day(s) later cannot be priced reliably.`
                 };
             }
 
@@ -2944,7 +2952,9 @@ function extractPortfolioSummaryXirr(wb) {
             }
 
             let units = 0;
+            const lateWithinTolerance = fullCashflows.filter(cf => cf.date > lastSeriesDate && ((cf.date - lastSeriesDate) / DAY_MS) <= maxLagDays);
             let note = `* internal cashflow-matched analytic using series through ${formatDateShort(lastPoint.date)}`;
+            const xirrCashflows = [];
 
             if (preSeriesCashflows.length) {
                 const syntheticStartValue = futureValueAtDate(preSeriesCashflows, firstSeriesDate, clientXirrPct);
@@ -2955,7 +2965,13 @@ function extractPortfolioSummaryXirr(wb) {
                     };
                 }
                 units += syntheticStartValue / Number(firstSeriesValue);
+                xirrCashflows.push({
+                    date: new Date(firstSeriesDate.getFullYear(), firstSeriesDate.getMonth(), firstSeriesDate.getDate()),
+                    amount: -syntheticStartValue
+                });
                 note = `* assumes client earned the reported portfolio XIRR until ${formatDateShort(firstSeriesDate)}, then switched into ${label}; internal analytic only`;
+            } else {
+                note = `* assumes the client invested in ${label} from their first external cashflow; internal analytic only`;
             }
 
             for (const cf of investableCashflows) {
@@ -2967,12 +2983,29 @@ function extractPortfolioSummaryXirr(wb) {
                     };
                 }
 
-                if (cf.amount < 0) units += (-cf.amount) / px;
-                else units -= (cf.amount) / px;
+                if (cf.amount < 0) {
+                    units += (-cf.amount) / px;
+                } else {
+                    const redeemUnits = cf.amount / px;
+                    if (redeemUnits - units > 1e-9) {
+                        return {
+                            value: NaN,
+                            note: `${label} hypothetical units would turn negative on ${formatDateShort(cf.date)}; redemption exceeds the bridged ${label} value path.`
+                        };
+                    }
+                    units = Math.max(0, units - redeemUnits);
+                }
+                xirrCashflows.push({
+                    date: new Date(cf.date.getFullYear(), cf.date.getMonth(), cf.date.getDate()),
+                    amount: Number(cf.amount)
+                });
+            }
+
+            if (lateWithinTolerance.length) {
+                note += ` | ${lateWithinTolerance.length} cashflow(s) within ${maxLagDays} day(s) of series end priced at last available ${label} value`;
             }
 
             const terminalValue = units * Number(lastPoint.value);
-            const xirrCashflows = fullCashflows.slice();
             xirrCashflows.push({ date: new Date(lastPoint.date.getFullYear(), lastPoint.date.getMonth(), lastPoint.date.getDate()), amount: terminalValue });
 
             const guess = isFinite(clientXirrPct) ? clientXirrPct / 100 : 0.12;
@@ -5146,13 +5179,14 @@ function loadSectorChart() {
 
         function updateMetricsTable() {
             const tbody = document.getElementById('metricsTableBody');
-            const client = clientMetrics[currentPeriod];
-            const fincart = fincartMetrics[currentPeriod];
-            const benchmark = benchmarkMetrics[currentPeriod];
+            if (!tbody) return;
+            const client = (clientMetrics && clientMetrics[currentPeriod]) || {};
+            const fincart = (fincartMetrics && fincartMetrics[currentPeriod]) || {};
+            const benchmark = (benchmarkMetrics && benchmarkMetrics[currentPeriod]) || {};
 
             const fmt = (v, decimals = 2, suffix = '') => {
                 if (v === null || v === undefined || isNaN(v)) return '-';
-                return v.toFixed(decimals) + suffix;
+                return Number(v).toFixed(decimals) + suffix;
             };
 
             const metrics = [
@@ -5822,7 +5856,7 @@ function exportDatasetJsonFlow(){
   };
 
   const state = {
-    schemaVersion: 6,  // v6: preserves saved category allocation during dataset JSON restore
+    schemaVersion: 7,  // v7: guards sparse metrics, stricter date parsing, and negative-unit XIRR protection
     savedAt: Date.now(),
     clientName: clientName || '',
     clientXirr: document.getElementById('clientXirrDisplay')?.textContent || '',
@@ -7642,7 +7676,7 @@ body.view-mobile #fundPerformancePage .comparison-table thead th:first-child{
     var interactiveWrap = document.getElementById('metricsTableBody');
     if (interactiveWrap && interactiveWrap.closest) {
       var tw = interactiveWrap.closest('.table-wrapper');
-      if (tw) tw.id = 'portfolioDiagnosisInteractiveTable';
+      if (tw && !tw.id) tw.id = 'portfolioDiagnosisInteractiveTable';
     }
   }
 
@@ -7664,7 +7698,7 @@ body.view-mobile #fundPerformancePage .comparison-table thead th:first-child{
       var tbody = document.getElementById('metricsTableBody');
       if (tbody && tbody.closest) {
         tw = tbody.closest('.table-wrapper');
-        if (tw) tw.id = 'portfolioDiagnosisInteractiveTable';
+        if (tw && !tw.id) tw.id = 'portfolioDiagnosisInteractiveTable';
       }
     }
   }
