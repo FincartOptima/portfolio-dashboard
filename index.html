@@ -1507,8 +1507,10 @@ th.sortable .sort-ind{ margin-left:6px; font-size:11px; opacity:.7; }
 <div class="metric-card">
 <div class="metric-label">BSE 500 (XIRR)</div>
 <div class="metric-value" id="bseXirrDisplay">—</div>
+
 </div>
 </div>
+
 </div></div></div>
 <div class="container" id="fundPerformancePage" style="display:none;">
   <div class="header">
@@ -2071,7 +2073,7 @@ function computeCalendarYearReturns(rows, years) {
 }
 
 function computeAlphaYearwise(schemeReturnsRows, benchReturnsMap, years) {
-    // Alpha (pp) = FUND - BENCHMARK (as requested)
+    // Excess return (percentage points) = FUND - BENCHMARK
     const out = [];
     for (const r of schemeReturnsRows || []) {
         const row = { scheme: r.scheme, alpha: {} };
@@ -2138,8 +2140,8 @@ function renderFundPerfReturnsTable() {
     const showAll = showAllToggle ? !!showAllToggle.checked : false;
     const topNames = (window.topHoldingsNames || []).map(x => String(x || '').trim()).filter(Boolean);
 
-    if (!showAll && topNames.length > 0) note.textContent = 'Showing alpha (Fund − Benchmark) for Top 5 holdings (by invested) when matched. Toggle “Show all schemes” to view everything in the file.';
-    else note.textContent = `Showing ${alphaRows.length} scheme(s). Metric: alpha = Fund − Benchmark (pp). Years: 2015–2025.`;
+    if (!showAll && topNames.length > 0) note.textContent = 'Showing excess return (Fund − Benchmark) for Top 5 holdings (by invested) when matched. Toggle “Show all schemes” to view everything in the file.';
+    else note.textContent = `Showing ${alphaRows.length} scheme(s). Metric: excess return = Fund − Benchmark (pp). Years: 2015–2025.`;
 }
 
 async function handleFundPerfUpload(event) {
@@ -2451,12 +2453,32 @@ function handleFileUpload(event, key, statusId) {
             return null;
         }
 
-        function isInflowTxnType(txnType) {
-            const t = String(txnType || '').toLowerCase();
+        function isNonExternalCashflowTxnType(txnType, txnDescription = '') {
+            const s = `${txnType || ''} ${txnDescription || ''}`.toLowerCase();
+            return (
+                s.includes('switch in') ||
+                s.includes('switch out') ||
+                s.includes('switch-over') ||
+                s.includes('switch ') ||
+                s.includes('transfer in') ||
+                s.includes('transfer out') ||
+                s.includes('transfered from folio') ||
+                s.includes('transferred from folio') ||
+                s.includes('stp in') ||
+                s.includes('stp out') ||
+                s.includes('stp ') ||
+                s.includes('dividend reinvest') ||
+                s.includes('reinvestment')
+            );
+        }
+
+        function isInflowTxnType(txnType, txnDescription = '') {
+            if (isNonExternalCashflowTxnType(txnType, txnDescription)) return false;
+            const t = `${txnType || ''} ${txnDescription || ''}`.toLowerCase();
             return (
                 t.includes('redemption') ||
                 t.includes('redeem') ||
-                t.includes('switch out') ||
+                t.includes('sell') ||
                 t.includes('swp') ||
                 t.includes('dividend payout')
             );
@@ -2628,14 +2650,10 @@ function extractPortfolioSummaryXirr(wb) {
         }
 
                 function extractCashflowsFromTxnWb(wb) {
-            // Supports:
-            //  - Single-sheet statements with mixed txn types (Purchase/Redemption/Switch/etc)
-            //  - Two-sheet exports: "Purchase" and "Sell" (your export)
-            //
-            // Cashflow sign convention (for XIRR):
-            //  - Outflows (investments / purchases / switch-in): negative
-            //  - Inflows  (redemptions / sell / switch-out / dividend payout): positive
-
+            // External-cashflow parser for XIRR:
+            //  - Purchases / SIPs funded by investor => negative cashflows
+            //  - Redemptions / sells / dividend payout => positive cashflows
+            //  - Internal transfers (Switch/STP/Transfer In/Out/reinvestment) are excluded
             const sheetNames = (wb.SheetNames || []).map(s => String(s));
             if (!sheetNames.length) throw new Error('Transaction workbook appears empty.');
 
@@ -2644,6 +2662,7 @@ function extractPortfolioSummaryXirr(wb) {
             const idxSell = lower.findIndex(s => s.includes('sell'));
 
             const cashflows = [];
+            const meta = { included: 0, excludedInternal: 0 };
 
             function pushFromSheet(sheetName, forcedSign /* -1 purchase, +1 sell, null infer */) {
                 const sheet = wb.Sheets[sheetName];
@@ -2656,8 +2675,9 @@ function extractPortfolioSummaryXirr(wb) {
                 const dateKey = findHeaderKey(keys, ['transaction date', 'txn date', 'date']);
                 const amtKey  = findHeaderKey(keys, ['total amount', 'amount', 'net amount']);
                 const typeKey = findHeaderKey(keys, ['txn type', 'transaction type', 'type']);
+                const descKey = findHeaderKey(keys, ['txn description', 'description', 'narration', 'remarks']);
 
-                if (!dateKey || !amtKey) return; // skip sheets that are not transaction tables
+                if (!dateKey || !amtKey) return;
 
                 for (const r of rows) {
                     const d = parseDateFlexible(r[dateKey]);
@@ -2667,20 +2687,21 @@ function extractPortfolioSummaryXirr(wb) {
                     const amt = Number(amtRaw);
                     if (!isFinite(amt) || amt === 0) continue;
 
-                    const absAmt = Math.abs(amt);
-
-                    let signed;
-                    if (forcedSign === -1) {
-                        signed = -absAmt; // purchases/outflows
-                    } else if (forcedSign === 1) {
-                        signed = absAmt;  // sells/redemptions/inflows
-                    } else {
-                        // Infer from txn type (redemption/switch-out/dividend payout => inflow)
-                        const isInflow = isInflowTxnType(typeKey ? r[typeKey] : '');
-                        signed = isInflow ? absAmt : -absAmt;
+                    const txnType = typeKey ? r[typeKey] : '';
+                    const txnDescription = descKey ? r[descKey] : '';
+                    if (isNonExternalCashflowTxnType(txnType, txnDescription)) {
+                        meta.excludedInternal++;
+                        continue;
                     }
 
+                    const absAmt = Math.abs(amt);
+                    let signed;
+                    if (forcedSign === -1) signed = -absAmt;
+                    else if (forcedSign === 1) signed = absAmt;
+                    else signed = isInflowTxnType(txnType, txnDescription) ? absAmt : -absAmt;
+
                     cashflows.push({ date: d, amount: signed });
+                    meta.included++;
                 }
             }
 
@@ -2688,15 +2709,15 @@ function extractPortfolioSummaryXirr(wb) {
                 if (idxPurchase !== -1) pushFromSheet(sheetNames[idxPurchase], -1);
                 if (idxSell !== -1) pushFromSheet(sheetNames[idxSell], 1);
             } else {
-                // generic: scan all sheets and infer sign from txn type
                 for (const sName of sheetNames) pushFromSheet(sName, null);
             }
 
             cashflows.sort((a, b) => a.date - b.date);
 
             const inceptionDate = cashflows.length ? cashflows[0].date : null;
-            if (cashflows.length < 2) throw new Error('Not enough transactions to compute XIRR.');
-            return { cashflows, inceptionDate };
+            if (cashflows.length < 2) throw new Error('Not enough external cashflows to compute XIRR after excluding internal transfers.');
+            window._cashflowMeta = meta;
+            return { cashflows, inceptionDate, meta };
         }
 
         function extractSeriesFromWb(wb, valueNeedles) {
@@ -2733,150 +2754,297 @@ function extractPortfolioSummaryXirr(wb) {
         }
 
         function buildLookup(series) {
-            const dates = series.map(p => p.date.getTime());
-            const values = series.map(p => p.value);
+            const points = (series || [])
+                .filter(p => p && p.date instanceof Date && !isNaN(p.date) && isFinite(Number(p.value)))
+                .slice()
+                .sort((a, b) => a.date - b.date);
 
-            function valueOnOrBefore(d) {
+            const dates = points.map(p => p.date.getTime());
+            const values = points.map(p => Number(p.value));
+
+            function indexOnOrBefore(d) {
                 const t = d.getTime();
-                // binary search last <= t
                 let lo = 0, hi = dates.length - 1, ans = -1;
                 while (lo <= hi) {
                     const mid = (lo + hi) >> 1;
                     if (dates[mid] <= t) { ans = mid; lo = mid + 1; }
                     else hi = mid - 1;
                 }
-                if (ans === -1) return values[0] ?? null; // fallback to first available
-                return values[ans];
+                return ans;
             }
 
-            return { dates, values, valueOnOrBefore };
+            function valueOnOrBefore(d) {
+                const idx = indexOnOrBefore(d);
+                return idx === -1 ? null : values[idx];
+            }
+
+            return {
+                dates,
+                values,
+                firstDate: points[0]?.date || null,
+                lastDate: points[points.length - 1]?.date || null,
+                indexOnOrBefore,
+                valueOnOrBefore
+            };
         }
 
         function xirr(cashflows, guess = 0.12) {
-            // Newton-Raphson on XNPV.
-            // Tries multiple starting guesses and returns the best-converging result,
-            // so loss-making or high-return portfolios don't silently give wrong answers.
             if (!cashflows || cashflows.length < 2) return NaN;
 
-            const cf = cashflows.slice().sort((a, b) => a.date - b.date);
+            const merged = new Map();
+            for (const c of cashflows) {
+                if (!c || !(c.date instanceof Date) || isNaN(c.date) || !isFinite(Number(c.amount))) continue;
+                const d = new Date(c.date.getFullYear(), c.date.getMonth(), c.date.getDate());
+                const key = d.getTime();
+                merged.set(key, (merged.get(key) || 0) + Number(c.amount));
+            }
+
+            const cf = Array.from(merged.entries())
+                .map(([t, amount]) => ({ date: new Date(Number(t)), amount }))
+                .filter(c => isFinite(c.amount) && Math.abs(c.amount) > 1e-12)
+                .sort((a, b) => a.date - b.date);
+
+            if (cf.length < 2) return NaN;
+            if (!cf.some(c => c.amount < 0) || !cf.some(c => c.amount > 0)) return NaN;
+
             const d0 = cf[0].date;
+            const DAY_MS = 24 * 60 * 60 * 1000;
+
+            function yearFrac(d) {
+                return (d - d0) / DAY_MS / 365.0;
+            }
 
             function npv(rate) {
+                if (!isFinite(rate) || rate <= -0.999999999) return NaN;
                 let sum = 0;
                 for (const c of cf) {
-                    const t = (c.date - d0) / (1000 * 60 * 60 * 24) / 365.0;
+                    const t = yearFrac(c.date);
                     sum += c.amount / Math.pow(1 + rate, t);
                 }
                 return sum;
             }
 
             function dnpv(rate) {
+                if (!isFinite(rate) || rate <= -0.999999999) return NaN;
                 let sum = 0;
                 for (const c of cf) {
-                    const t = (c.date - d0) / (1000 * 60 * 60 * 24) / 365.0;
+                    const t = yearFrac(c.date);
                     sum += (-t) * c.amount / Math.pow(1 + rate, t + 1);
                 }
                 return sum;
             }
 
-            function tryGuess(start) {
+            function tryNewton(start) {
                 let r = start;
                 for (let i = 0; i < 100; i++) {
                     const f = npv(r);
                     const fp = dnpv(r);
-                    if (!isFinite(f) || !isFinite(fp) || fp === 0) return { r, residual: Infinity };
+                    if (!isFinite(f) || !isFinite(fp) || Math.abs(fp) < 1e-14) break;
                     const rNext = r - f / fp;
-                    if (!isFinite(rNext) || rNext <= -1) return { r, residual: Infinity };
-                    if (Math.abs(rNext - r) < 1e-10) return { r: rNext, residual: Math.abs(npv(rNext)) };
+                    if (!isFinite(rNext) || rNext <= -0.999999999) break;
+                    if (Math.abs(rNext - r) < 1e-12) {
+                        const residual = Math.abs(npv(rNext));
+                        return { r: rNext, residual };
+                    }
                     r = rNext;
                 }
-                return { r, residual: Math.abs(npv(r)) };
+                const residual = Math.abs(npv(r));
+                return { r, residual: isFinite(residual) ? residual : Infinity };
             }
 
-            // Try several starting points to handle loss-making or high-return portfolios
-            const guesses = [guess, 0.0, -0.1, 0.5, 1.5, -0.5];
+            const guesses = [guess, 0.1, 0.0, -0.1, 0.5, 1.0, -0.5];
             let best = { r: NaN, residual: Infinity };
             for (const g of guesses) {
-                const res = tryGuess(g);
+                const res = tryNewton(g);
                 if (isFinite(res.residual) && res.residual < best.residual) best = res;
-                if (best.residual < 1e-6) break; // good enough, stop early
+                if (best.residual < 1e-8) return best.r;
             }
-            return best.r;
+
+            const scan = [-0.9999, -0.99, -0.95, -0.9, -0.75, -0.5, -0.25, -0.1, 0, 0.1, 0.2, 0.5, 1, 2, 5, 10];
+            for (let i = 1; i < scan.length; i++) {
+                const lo0 = scan[i - 1];
+                const hi0 = scan[i];
+                const flo = npv(lo0);
+                const fhi = npv(hi0);
+                if (!isFinite(flo) || !isFinite(fhi)) continue;
+                if (flo === 0) return lo0;
+                if (fhi === 0) return hi0;
+                if (flo * fhi > 0) continue;
+
+                let lo = lo0, hi = hi0, fLo = flo, fHi = fhi;
+                for (let iter = 0; iter < 200; iter++) {
+                    const mid = (lo + hi) / 2;
+                    const fMid = npv(mid);
+                    if (!isFinite(fMid)) break;
+                    if (Math.abs(fMid) < 1e-10 || Math.abs(hi - lo) < 1e-12) return mid;
+                    if (fLo * fMid <= 0) {
+                        hi = mid;
+                        fHi = fMid;
+                    } else {
+                        lo = mid;
+                        fLo = fMid;
+                    }
+                }
+            }
+
+            return (isFinite(best.r) && best.residual < 1e-4) ? best.r : NaN;
         }
 
-        function computeIndexXirrFromCashflows(cashflows, series) {
-            const lookup = buildLookup(series);
-            const lastPoint = series[series.length - 1];
-            let units = 0;
+        function computeIndexXirrFromCashflows(cashflows, series, label = 'Series') {
+            if (!series || !series.length) {
+                return { value: NaN, note: `${label} series not found.` };
+            }
 
-            for (const cf of cashflows) {
+            const lookup = buildLookup(series);
+            const firstSeriesDate = lookup.firstDate;
+            const lastSeriesDate = lookup.lastDate;
+            const lastPoint = series[series.length - 1];
+
+            if (!firstSeriesDate || !lastSeriesDate || !lastPoint || !isFinite(Number(lastPoint.value))) {
+                return { value: NaN, note: `${label} series not found.` };
+            }
+
+            const fullCashflows = (cashflows || [])
+                .filter(cf => cf && cf.date instanceof Date && !isNaN(cf.date) && isFinite(Number(cf.amount)) && Number(cf.amount) !== 0)
+                .slice()
+                .sort((a, b) => a.date - b.date);
+
+            if (fullCashflows.length < 2) {
+                return { value: NaN, note: `Not enough cashflows to compute ${label} XIRR.` };
+            }
+
+            const tooEarly = fullCashflows.find(cf => cf.date < firstSeriesDate);
+            if (tooEarly) {
+                return {
+                    value: NaN,
+                    note: `${label} starts on ${formatDateShort(firstSeriesDate)}; earlier cashflows cannot be priced reliably.`
+                };
+            }
+
+            let units = 0;
+            for (const cf of fullCashflows) {
                 const px = lookup.valueOnOrBefore(cf.date);
-                if (!px || !isFinite(px)) continue;
+                if (!(px > 0)) {
+                    return {
+                        value: NaN,
+                        note: `Missing valid ${label} value for ${formatDateShort(cf.date)}.`
+                    };
+                }
 
                 if (cf.amount < 0) units += (-cf.amount) / px;
                 else units -= (cf.amount) / px;
             }
 
-            const terminalValue = units * (lastPoint?.value ?? 0);
-            const full = cashflows.slice();
-            full.push({ date: lastPoint.date, amount: terminalValue });
+            const terminalValue = units * Number(lastPoint.value);
+            const xirrCashflows = fullCashflows.slice();
+            xirrCashflows.push({ date: lastPoint.date, amount: terminalValue });
 
-            const r = xirr(full, 0.12);
-            return r * 100; // percent
+            const r = xirr(xirrCashflows, 0.12);
+            const note = `* internal cashflow-matched analytic using series through ${formatDateShort(lastPoint.date)}`;
+            return { value: isFinite(r) ? r * 100 : NaN, note };
         }
 
         
         function computePeriodMetrics(series, benchmarkSeries) {
-            // Computes portfolio metrics for fixed windows (1Y, 3Y)
-            // Notes:
-            // - Uses arithmetic mean of periodic returns for Sharpe/Sortino/Alpha/Beta
-            // - Annualization factor is inferred from the series frequency (daily -> ~252)
             const out = {};
             if (!series || series.length < 2) return out;
 
-            const periods = { '1Y': { y: 1 }, '3Y': { y: 3 } };
+            const DAY_MS = 24 * 60 * 60 * 1000;
+            const periods = {
+                '1Y': { years: 1, freq: 'weekly', ppy: 52, minObs: 20, maxLagDays: 10 },
+                '3Y': { years: 3, freq: 'monthly', ppy: 12, minObs: 12, maxLagDays: 40 }
+            };
 
-            // benchmark lookup aligned by YYYY-MM-DD
-            const benchByDate = new Map();
-            if (benchmarkSeries && benchmarkSeries.length) {
-                for (const p of benchmarkSeries) benchByDate.set(p.date.toISOString().slice(0, 10), p.value);
+            function cloneAndSort(points) {
+                return (points || [])
+                    .filter(p => p && p.date instanceof Date && !isNaN(p.date) && isFinite(Number(p.value)) && Number(p.value) > 0)
+                    .map(p => ({ date: new Date(p.date.getFullYear(), p.date.getMonth(), p.date.getDate()), value: Number(p.value) }))
+                    .sort((a, b) => a.date - b.date);
             }
 
-            function sliceSince(period) {
-                const endDate = series[series.length - 1].date;
-                const cutoffDate = new Date(endDate.getTime());
-                if (period.m) cutoffDate.setMonth(cutoffDate.getMonth() - period.m);
-                if (period.y) cutoffDate.setFullYear(cutoffDate.getFullYear() - period.y);
-                const sliced = series.filter(p => p.date >= cutoffDate);
-                return sliced.length >= 2 ? sliced : series.slice(Math.max(0, series.length - 2));
-            }
-
-            function dailyReturns(points) {
-                const rets = [];
-                for (let i = 1; i < points.length; i++) {
-                    const prev = points[i - 1].value;
-                    const cur = points[i].value;
-                    if (prev && isFinite(prev) && cur && isFinite(cur)) rets.push(cur / prev - 1);
+            function dedupeByDate(points) {
+                const out = [];
+                for (const p of points || []) {
+                    const prev = out[out.length - 1];
+                    if (prev && prev.date.getTime() === p.date.getTime()) out[out.length - 1] = p;
+                    else out.push(p);
                 }
-                return rets;
+                return out;
+            }
+
+            function medianGapDays(points) {
+                if (!points || points.length < 3) return Infinity;
+                const gaps = [];
+                for (let i = 1; i < points.length; i++) {
+                    const g = (points[i].date - points[i - 1].date) / DAY_MS;
+                    if (isFinite(g) && g > 0) gaps.push(g);
+                }
+                if (!gaps.length) return Infinity;
+                gaps.sort((a, b) => a - b);
+                return gaps[Math.floor(gaps.length / 2)];
+            }
+
+            function sanitizeSeries(points) {
+                const arr = dedupeByDate(cloneAndSort(points));
+                const med = medianGapDays(arr);
+                if (med <= 2.1) {
+                    return arr.filter(p => {
+                        const day = p.date.getDay();
+                        return day !== 0 && day !== 6;
+                    });
+                }
+                return arr;
+            }
+
+            function indexOnOrBefore(points, d) {
+                const t = d.getTime();
+                let lo = 0, hi = points.length - 1, ans = -1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (points[mid].date.getTime() <= t) {
+                        ans = mid;
+                        lo = mid + 1;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                return ans;
+            }
+
+            function pointOnOrBefore(points, d) {
+                const idx = indexOnOrBefore(points, d);
+                return idx === -1 ? null : points[idx];
+            }
+
+            function buildWindow(points, cutoffDate, endDate) {
+                if (!points || !points.length) return [];
+                const base = pointOnOrBefore(points, cutoffDate) || points[0];
+                const out = [{ date: new Date(base.date.getTime()), value: Number(base.value) }];
+                for (const p of points) {
+                    if (p.date <= base.date) continue;
+                    if (p.date > endDate) break;
+                    out.push({ date: new Date(p.date.getTime()), value: Number(p.value) });
+                }
+                return dedupeByDate(out);
+            }
+
+            function cagr(points) {
+                if (!points || points.length < 2) return NaN;
+                const start = Number(points[0].value);
+                const endV = Number(points[points.length - 1].value);
+                const days = (points[points.length - 1].date - points[0].date) / DAY_MS;
+                if (!(start > 0) || !(endV > 0) || !(days > 0)) return NaN;
+                return (Math.pow(endV / start, 365.25 / days) - 1) * 100;
             }
 
             function maxDrawdown(points) {
                 let peak = -Infinity;
                 let mdd = 0;
-                for (const p of points) {
-                    peak = Math.max(peak, p.value);
-                    if (peak > 0) mdd = Math.min(mdd, p.value / peak - 1);
+                for (const p of points || []) {
+                    peak = Math.max(peak, Number(p.value));
+                    if (peak > 0) mdd = Math.min(mdd, Number(p.value) / peak - 1);
                 }
                 return mdd * 100;
-            }
-
-            function cagr(points) {
-                const start = points[0].value;
-                const endV = points[points.length - 1].value;
-                const days = (points[points.length - 1].date - points[0].date) / (1000 * 60 * 60 * 24);
-                if (!start || !endV || days <= 0) return NaN;
-                return (Math.pow(endV / start, 365.25 / days) - 1) * 100;
             }
 
             function std(arr) {
@@ -2886,80 +3054,127 @@ function extractPortfolioSummaryXirr(wb) {
                 return Math.sqrt(v);
             }
 
-            function inferPeriodsPerYear(points) {
-                // Infer sampling frequency from median day gaps
-                if (!points || points.length < 3) return 252;
-                const gaps = [];
-                for (let i = 1; i < points.length; i++) {
-                    const g = (points[i].date - points[i - 1].date) / (1000 * 60 * 60 * 24);
-                    if (isFinite(g) && g > 0) gaps.push(g);
-                }
-                if (!gaps.length) return 252;
-                gaps.sort((a, b) => a - b);
-                const med = gaps[Math.floor(gaps.length / 2)];
-
-                // Typical cases
-                if (med <= 2.1) return 252;      // daily / trading-day series
-                if (med <= 10) return 52;        // weekly-ish
-                if (med <= 20) return 26;        // bi-weekly-ish
-                if (med <= 45) return 12;        // monthly-ish
-                return 1;                        // yearly-ish / sparse
-            }
-
             function rfPerPeriod(ppy) {
-                // Convert annual RF to per-period RF
                 const rfA = (typeof RISK_FREE_RATE_ANNUAL === 'number' && isFinite(RISK_FREE_RATE_ANNUAL)) ? RISK_FREE_RATE_ANNUAL : 0;
                 return Math.pow(1 + rfA, 1 / ppy) - 1;
             }
 
-            for (const [k, period] of Object.entries(periods)) {
-                const pts = sliceSince(period);
-                const ppy = inferPeriodsPerYear(pts);
+            function endOfWeekFriday(date) {
+                const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+                const day = d.getDay();
+                const delta = (5 - day + 7) % 7;
+                d.setDate(d.getDate() + delta);
+                d.setHours(0, 0, 0, 0);
+                return d;
+            }
 
-                const c = cagr(pts);
+            function endOfMonth(date) {
+                const d = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+                d.setHours(0, 0, 0, 0);
+                return d;
+            }
 
-                const rp = dailyReturns(pts);
-                const vol = std(rp) * Math.sqrt(ppy) * 100; // %
+            function generateAnchors(startDate, endDate, freq) {
+                const anchors = [];
+                if (!(startDate instanceof Date) || !(endDate instanceof Date) || startDate > endDate) return anchors;
 
-                // Sharpe: annualized arithmetic excess return / annualized volatility
-                const rf = rfPerPeriod(ppy);
+                let current = (freq === 'monthly') ? endOfMonth(startDate) : endOfWeekFriday(startDate);
+                while (current <= endDate) {
+                    anchors.push(new Date(current.getTime()));
+                    if (freq === 'monthly') current = endOfMonth(new Date(current.getFullYear(), current.getMonth() + 1, 1));
+                    else {
+                        current = new Date(current.getTime());
+                        current.setDate(current.getDate() + 7);
+                        current.setHours(0, 0, 0, 0);
+                    }
+                }
+                if (!anchors.length || anchors[anchors.length - 1].getTime() !== endDate.getTime()) {
+                    anchors.push(new Date(endDate.getTime()));
+                }
+                return anchors;
+            }
+
+            function resampleSeries(points, startDate, endDate, freq, maxLagDays) {
+                const anchors = generateAnchors(startDate, endDate, freq);
+                const rows = [];
+                for (const anchor of anchors) {
+                    const p = pointOnOrBefore(points, anchor);
+                    if (!p) continue;
+                    const lagDays = (anchor - p.date) / DAY_MS;
+                    if (lagDays > maxLagDays) continue;
+                    rows.push({ date: new Date(anchor.getTime()), value: Number(p.value) });
+                }
+                return dedupeByDate(rows);
+            }
+
+            function returnsFromPoints(points) {
+                const rets = [];
+                for (let i = 1; i < (points || []).length; i++) {
+                    const prev = Number(points[i - 1].value);
+                    const cur = Number(points[i].value);
+                    if (prev > 0 && cur > 0) rets.push(cur / prev - 1);
+                }
+                return rets;
+            }
+
+            const baseSeries = sanitizeSeries(series);
+            const baseBenchmark = sanitizeSeries(benchmarkSeries || []);
+
+            for (const [k, spec] of Object.entries(periods)) {
+                const endDate = baseSeries[baseSeries.length - 1].date;
+                const cutoffDate = new Date(endDate.getTime());
+                cutoffDate.setFullYear(cutoffDate.getFullYear() - spec.years);
+
+                const windowPoints = buildWindow(baseSeries, cutoffDate, endDate);
+                const c = cagr(windowPoints);
+                const maxDDVal = maxDrawdown(windowPoints);
+
+                const periodSeries = (windowPoints.length >= 2)
+                    ? resampleSeries(windowPoints, windowPoints[0].date, windowPoints[windowPoints.length - 1].date, spec.freq, spec.maxLagDays)
+                    : [];
+                const rp = returnsFromPoints(periodSeries);
+                const vol = std(rp) * Math.sqrt(spec.ppy) * 100;
+
+                const rf = rfPerPeriod(spec.ppy);
                 const meanp = rp.length ? (rp.reduce((a, b) => a + b, 0) / rp.length) : NaN;
-                const annExcess = (isFinite(meanp) ? (meanp - rf) * ppy : NaN);
-                const sharpe = (isFinite(annExcess) && isFinite(vol) && vol !== 0) ? (annExcess) / (vol / 100) : NaN;
+                const annExcess = isFinite(meanp) ? (meanp - rf) * spec.ppy : NaN;
+                const sharpe = (isFinite(annExcess) && isFinite(vol) && vol !== 0) ? annExcess / (vol / 100) : NaN;
 
-                // Sortino: correct semi-deviation formula.
-                // Uses ALL N observations in denominator (not just count of negative returns),
-                // and benchmarks each return against per-period risk-free rate (not the mean).
-                // Formula: DD = sqrt( sum(min(Ri - rf, 0)^2) / N ) * sqrt(ppy)
                 const semiSumSq = rp.reduce((acc, r) => {
                     if (!isFinite(r)) return acc;
                     const excess = r - rf;
                     return acc + (excess < 0 ? excess * excess : 0);
                 }, 0);
-                const downDev = (rp.length > 0)
-                    ? Math.sqrt(semiSumSq / rp.length) * Math.sqrt(ppy) * 100
-                    : NaN;
-                const sortino = (isFinite(annExcess) && isFinite(downDev) && downDev !== 0) ? (annExcess) / (downDev / 100) : NaN;
+                const downDev = rp.length ? Math.sqrt(semiSumSq / rp.length) * Math.sqrt(spec.ppy) * 100 : NaN;
+                const sortino = (isFinite(annExcess) && isFinite(downDev) && downDev !== 0) ? annExcess / (downDev / 100) : NaN;
 
-                // Beta/Alpha vs benchmark (aligned by date)
                 let beta = NaN, alpha = NaN;
-                if (benchmarkSeries && benchmarkSeries.length) {
-                    const benchPts = pts
-                        .map(p => {
-                            const d = p.date.toISOString().slice(0, 10);
-                            const bv = benchByDate.get(d);
-                            return bv ? { date: p.date, value: bv } : null;
-                        })
-                        .filter(Boolean);
+                if (baseBenchmark.length >= 2 && windowPoints.length >= 2) {
+                    const benchWindow = buildWindow(baseBenchmark, windowPoints[0].date, windowPoints[windowPoints.length - 1].date);
+                    if (benchWindow.length >= 2) {
+                        const portResampled = resampleSeries(windowPoints, windowPoints[0].date, windowPoints[windowPoints.length - 1].date, spec.freq, spec.maxLagDays);
+                        const benchResampled = resampleSeries(benchWindow, benchWindow[0].date, benchWindow[benchWindow.length - 1].date, spec.freq, spec.maxLagDays);
 
-                    const rb = dailyReturns(benchPts);
-                    const n = Math.min(rp.length, rb.length);
-                    if (n >= 20) {
-                        const rp2 = rp.slice(-n);
-                        const rb2 = rb.slice(-n);
+                    const benchMap = new Map(benchResampled.map(p => [p.date.getTime(), Number(p.value)]));
+                    const sharedPoints = portResampled
+                        .filter(p => benchMap.has(p.date.getTime()) && Number(p.value) > 0 && benchMap.get(p.date.getTime()) > 0)
+                        .map(p => ({ date: new Date(p.date.getTime()), pVal: Number(p.value), bVal: benchMap.get(p.date.getTime()) }));
+
+                    const rp2 = [];
+                    const rb2 = [];
+                    for (let i = 1; i < sharedPoints.length; i++) {
+                        const prev = sharedPoints[i - 1];
+                        const curr = sharedPoints[i];
+                        if (prev.pVal > 0 && curr.pVal > 0 && prev.bVal > 0 && curr.bVal > 0) {
+                            rp2.push(curr.pVal / prev.pVal - 1);
+                            rb2.push(curr.bVal / prev.bVal - 1);
+                        }
+                    }
+
+                    const n = Math.min(rp2.length, rb2.length);
+                    if (n >= spec.minObs) {
                         const mp = rp2.reduce((a, b) => a + b, 0) / n;
                         const mb = rb2.reduce((a, b) => a + b, 0) / n;
-
                         let cov = 0, varb = 0;
                         for (let i = 0; i < n; i++) {
                             cov += (rp2[i] - mp) * (rb2[i] - mb);
@@ -2969,9 +3184,10 @@ function extractPortfolioSummaryXirr(wb) {
                         varb /= (n - 1);
                         beta = varb ? cov / varb : NaN;
 
-                        // Jensen alpha (annualized), using per-period RF
-                        const dailyAlpha = (mp - rf) - (beta * (mb - rf));
-                        alpha = dailyAlpha * ppy * 100;
+                        const rfAligned = rfPerPeriod(spec.ppy);
+                        const periodAlpha = (mp - rfAligned) - (beta * (mb - rfAligned));
+                        alpha = periodAlpha * spec.ppy * 100;
+                    }
                     }
                 }
 
@@ -2982,7 +3198,7 @@ function extractPortfolioSummaryXirr(wb) {
                     sortino: sortino,
                     alpha: alpha,
                     beta: beta,
-                    maxDD: maxDrawdown(pts)
+                    maxDD: maxDDVal
                 };
             }
 
@@ -3269,6 +3485,10 @@ const keys = Object.keys(rows[0] || {});
                     const amt = Math.abs(Number(amtRaw));
                     if (!isFinite(amt) || amt === 0) continue;
 
+                    const txnType = kType ? r[kType] : '';
+                    const txnDescription = String(r['TXN DESCRIPTION'] ?? r['Txn Description'] ?? r['txn description'] ?? '');
+                    if (isNonExternalCashflowTxnType(txnType, txnDescription)) continue;
+
                     let signed;
                     if (forcedSign === 1) {
                         signed = amt;          // purchases add
@@ -3277,7 +3497,7 @@ const keys = Object.keys(rows[0] || {});
                     } else {
                         // Fallback for generic statements: infer sign from txn type.
                         // NOTE: isInflowTxnType() here is actually an "isOutflow" detector (redemption/switch-out/etc).
-                        const isOutflow = isInflowTxnType(kType ? r[kType] : '');
+                        const isOutflow = isInflowTxnType(txnType, txnDescription);
                         signed = isOutflow ? -amt : amt;
                     }
 
@@ -4141,17 +4361,39 @@ async function processUploadedFilesAndRender() {
             window._bseSeries = bseSeries;
 
             // 4) Benchmark/model XIRR using same cashflows (units simulation)
-            const modelXirr = computeIndexXirrFromCashflows(cashflows, modelSeries);
-            const bseXirr = computeIndexXirrFromCashflows(cashflows, bseSeries);
+            const modelXirr = computeIndexXirrFromCashflows(cashflows, modelSeries, 'Fincart Optima');
+            const bseXirr = computeIndexXirrFromCashflows(cashflows, bseSeries, 'BSE 500');
 
             // 5) Update top XIRR cards
             const clientEl = document.getElementById('clientXirrDisplay');
             const modelEl = document.getElementById('modelXirrDisplay');
             const bseEl = document.getElementById('bseXirrDisplay');
+            const modelFootnoteEl = document.getElementById('modelXirrFootnote');
+            const bseFootnoteEl = document.getElementById('bseXirrFootnote');
+            const cashflowMeta = window._cashflowMeta || null;
 
             if (clientEl) clientEl.textContent = formatPct(clientXirr);
-            if (modelEl) modelEl.textContent = formatPct(modelXirr);
-            if (bseEl) bseEl.textContent = formatPct(bseXirr);
+            if (modelEl) modelEl.textContent = formatPct(modelXirr.value);
+            if (bseEl) bseEl.textContent = formatPct(bseXirr.value);
+            if (modelFootnoteEl) {
+                const em = modelFootnoteEl.querySelector('em') || document.createElement('em');
+                let note = modelXirr.note || '* internal analytic only; not SEBI benchmark reporting';
+                if (cashflowMeta && cashflowMeta.excludedInternal > 0) {
+                    note += ` | excluded ${cashflowMeta.excludedInternal} internal transfer row(s)`;
+                }
+                em.textContent = note;
+                modelFootnoteEl.innerHTML = '';
+                modelFootnoteEl.appendChild(em);
+            }
+            if (bseFootnoteEl) {
+                const em = bseFootnoteEl.querySelector('em') || document.createElement('em');
+                let note = bseXirr.note || '* internal analytic only; official benchmark comparison should use trailing return';
+                if (cashflowMeta && cashflowMeta.excludedInternal > 0) {
+                    note += ` | excluded ${cashflowMeta.excludedInternal} internal transfer row(s)`;
+                }
+                bseFootnoteEl.innerHTML = '';
+                bseFootnoteEl.appendChild(em);
+            }
 
             // 6) Compute model + benchmark risk metrics from time series
             fincartMetrics = computePeriodMetrics(modelSeries, bseSeries);
@@ -4323,7 +4565,7 @@ async function processUploadedFilesAndRender() {
             'Sharpe Ratio': 'Measures risk-adjusted performance; higher is better. (Return - Risk-Free Rate) / Std Dev.',
             'Volatility': 'A statistical measure of the dispersion of returns for a given security or market index.',
             'Max Drawdown': 'The maximum observed loss from a peak to a trough of a portfolio, before a new peak is attained.',
-            'Alpha': 'A measure of the performance on a risk-adjusted basis relative to a benchmark.',
+            'Alpha': 'Jensen alpha, annualized from aligned weekly/monthly returns relative to the benchmark after adjusting for beta and the assumed risk-free rate.',
             'Beta': 'A measure of the volatility or systematic risk of a security or portfolio compared to the market.',
             'Sortino Ratio': 'A variation of the Sharpe ratio that differentiates harmful volatility from total overall volatility.'
         };
