@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
@@ -2889,7 +2890,7 @@ function extractPortfolioSummaryXirr(wb) {
             return (isFinite(best.r) && best.residual < 1e-4) ? best.r : NaN;
         }
 
-        function computeIndexXirrFromCashflows(cashflows, series, label = 'Series') {
+        function computeIndexXirrFromCashflows(cashflows, series, label = 'Series', clientXirrPct = NaN) {
             if (!series || !series.length) {
                 return { value: NaN, note: `${label} series not found.` };
             }
@@ -2897,31 +2898,67 @@ function extractPortfolioSummaryXirr(wb) {
             const lookup = buildLookup(series);
             const firstSeriesDate = lookup.firstDate;
             const lastSeriesDate = lookup.lastDate;
+            const firstSeriesValue = lookup.valueOnOrBefore(firstSeriesDate);
             const lastPoint = series[series.length - 1];
 
-            if (!firstSeriesDate || !lastSeriesDate || !lastPoint || !isFinite(Number(lastPoint.value))) {
+            if (!firstSeriesDate || !lastSeriesDate || !lastPoint || !(firstSeriesValue > 0) || !isFinite(Number(lastPoint.value))) {
                 return { value: NaN, note: `${label} series not found.` };
             }
 
             const fullCashflows = (cashflows || [])
                 .filter(cf => cf && cf.date instanceof Date && !isNaN(cf.date) && isFinite(Number(cf.amount)) && Number(cf.amount) !== 0)
-                .slice()
+                .map(cf => ({
+                    date: new Date(cf.date.getFullYear(), cf.date.getMonth(), cf.date.getDate()),
+                    amount: Number(cf.amount)
+                }))
                 .sort((a, b) => a.date - b.date);
 
             if (fullCashflows.length < 2) {
                 return { value: NaN, note: `Not enough cashflows to compute ${label} XIRR.` };
             }
 
-            const tooEarly = fullCashflows.find(cf => cf.date < firstSeriesDate);
-            if (tooEarly) {
+            const tooLate = fullCashflows.find(cf => cf.date > lastSeriesDate);
+            if (tooLate) {
                 return {
                     value: NaN,
-                    note: `${label} starts on ${formatDateShort(firstSeriesDate)}; earlier cashflows cannot be priced reliably.`
+                    note: `${label} series ends on ${formatDateShort(lastSeriesDate)}; later cashflows cannot be priced reliably.`
                 };
             }
 
+            const preSeriesCashflows = fullCashflows.filter(cf => cf.date < firstSeriesDate);
+            const investableCashflows = fullCashflows.filter(cf => cf.date >= firstSeriesDate);
+
+            function futureValueAtDate(cflows, asOfDate, annualPct) {
+                if (!cflows.length) return 0;
+                if (!isFinite(annualPct)) return NaN;
+                const annualRate = annualPct / 100;
+                if (!isFinite(annualRate) || (1 + annualRate) <= 0) return NaN;
+
+                const DAY_MS = 24 * 60 * 60 * 1000;
+                let fv = 0;
+                for (const cf of cflows) {
+                    const years = (asOfDate - cf.date) / DAY_MS / 365.0;
+                    fv += -cf.amount * Math.pow(1 + annualRate, years);
+                }
+                return fv;
+            }
+
             let units = 0;
-            for (const cf of fullCashflows) {
+            let note = `* internal cashflow-matched analytic using series through ${formatDateShort(lastPoint.date)}`;
+
+            if (preSeriesCashflows.length) {
+                const syntheticStartValue = futureValueAtDate(preSeriesCashflows, firstSeriesDate, clientXirrPct);
+                if (!(syntheticStartValue > 0)) {
+                    return {
+                        value: NaN,
+                        note: `Cannot bridge pre-${label} history using client XIRR through ${formatDateShort(firstSeriesDate)}.`
+                    };
+                }
+                units += syntheticStartValue / Number(firstSeriesValue);
+                note = `* assumes client earned the reported portfolio XIRR until ${formatDateShort(firstSeriesDate)}, then switched into ${label}; internal analytic only`;
+            }
+
+            for (const cf of investableCashflows) {
                 const px = lookup.valueOnOrBefore(cf.date);
                 if (!(px > 0)) {
                     return {
@@ -2936,10 +2973,10 @@ function extractPortfolioSummaryXirr(wb) {
 
             const terminalValue = units * Number(lastPoint.value);
             const xirrCashflows = fullCashflows.slice();
-            xirrCashflows.push({ date: lastPoint.date, amount: terminalValue });
+            xirrCashflows.push({ date: new Date(lastPoint.date.getFullYear(), lastPoint.date.getMonth(), lastPoint.date.getDate()), amount: terminalValue });
 
-            const r = xirr(xirrCashflows, 0.12);
-            const note = `* internal cashflow-matched analytic using series through ${formatDateShort(lastPoint.date)}`;
+            const guess = isFinite(clientXirrPct) ? clientXirrPct / 100 : 0.12;
+            const r = xirr(xirrCashflows, guess);
             return { value: isFinite(r) ? r * 100 : NaN, note };
         }
 
@@ -4360,8 +4397,8 @@ async function processUploadedFilesAndRender() {
             window._bseSeries = bseSeries;
 
             // 4) Benchmark/model XIRR using same cashflows (units simulation)
-            const modelXirr = computeIndexXirrFromCashflows(cashflows, modelSeries, 'Fincart Optima');
-            const bseXirr = computeIndexXirrFromCashflows(cashflows, bseSeries, 'BSE 500');
+            const modelXirr = computeIndexXirrFromCashflows(cashflows, modelSeries, 'Fincart Optima', clientXirr);
+            const bseXirr = computeIndexXirrFromCashflows(cashflows, bseSeries, 'BSE 500', clientXirr);
 
             // 5) Update top XIRR cards
             const clientEl = document.getElementById('clientXirrDisplay');
