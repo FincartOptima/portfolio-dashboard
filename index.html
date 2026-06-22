@@ -3034,7 +3034,12 @@ function handleFileUpload(event, key, statusId) {
 
         async function readWorkbook(file) {
             const data = await file.arrayBuffer();
-            return XLSX.read(data, { type: 'array', cellDates: true });
+            // cellDates: false — keep Excel date cells as serial numbers and let
+            // parseDateFlexible convert them via the canonical Dec 30 1899 epoch.
+            // SheetJS's cellDates:true path applies a timezone-dependent shift
+            // that mis-aligns benchmark series by one day in IST and crushes the
+            // Beta / Alpha / Sharpe / Sortino regressions in the diagnosis card.
+            return XLSX.read(data, { type: 'array', cellDates: false });
         }
 
         function sheetToAoa(sheet) {
@@ -3787,6 +3792,49 @@ function extractPortfolioSummaryXirr(wb) {
 
                 out[k] = { cagr: c, vol: vol, sharpe: sharpe, sortino: sortino,
                            alpha: alpha, beta: beta, maxDD: mdd };
+
+                // Debug instrumentation: dump the inputs that feed Beta/Alpha
+                // so we can see why dashboard values diverge from direct math.
+                try {
+                  if (typeof window !== 'undefined' && window.__DEBUG_METRICS__) {
+                    if (!window.__metricsDebug) window.__metricsDebug = {};
+                    const pe = [], be = [];
+                    if (baseBenchmark.length >= 2 && windowPoints.length >= 2) {
+                      const aligned = [];
+                      for (const p of windowPoints) {
+                        const bi = indexOnOrBefore(baseBenchmark, p.date);
+                        if (bi >= 0) aligned.push({ date: p.date, a: p.value, b: baseBenchmark[bi].value });
+                      }
+                      for (let i = 1; i < aligned.length; i++) {
+                        pe.push(aligned[i].a / aligned[i-1].a - 1);
+                        be.push(aligned[i].b / aligned[i-1].b - 1);
+                      }
+                    }
+                    const sumP = pe.reduce((a,b)=>a+b,0), sumB = be.reduce((a,b)=>a+b,0);
+                    const mp = sumP/(pe.length||1), mb = sumB/(be.length||1);
+                    let sXY=0, sXX=0;
+                    for (let i=0;i<pe.length;i++){
+                      sXY += (be[i]-mb)*(pe[i]-mp);
+                      sXX += (be[i]-mb)**2;
+                    }
+                    window.__metricsDebug[k] = {
+                      windowFirstDate: windowPoints[0] && windowPoints[0].date,
+                      windowLastDate: windowPoints[windowPoints.length-1] && windowPoints[windowPoints.length-1].date,
+                      modelN: windowPoints.length,
+                      benchFirstDate: baseBenchmark[0] && baseBenchmark[0].date,
+                      benchLastDate: baseBenchmark[baseBenchmark.length-1] && baseBenchmark[baseBenchmark.length-1].date,
+                      benchN: baseBenchmark.length,
+                      alignedN: pe.length,
+                      sXY, sXX, beta_recomputed: sXX!==0 ? sXY/sXX : NaN,
+                      reported_beta: beta,
+                      reported_alpha: alpha,
+                      sample_pe_first10: pe.slice(0,10),
+                      sample_be_first10: be.slice(0,10),
+                      sample_pe_max: Math.max.apply(null, pe.map(x=>Math.abs(x))),
+                      sample_be_max: Math.max.apply(null, be.map(x=>Math.abs(x))),
+                    };
+                  }
+                } catch(e) { /* no-op */ }
             }
 
             return out;
